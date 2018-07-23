@@ -51,7 +51,7 @@ parser.add_argument('--momentum', default=0.9, type=float, metavar='M',
                     help='momentum')
 parser.add_argument('--weight-decay', '--wd', default=1e-4, type=float,
                     metavar='W', help='weight decay (default: 1e-4)')
-parser.add_argument('--print-freq', '-p', default=10, type=int,
+parser.add_argument('--print-freq', '-p', default=100, type=int,
                     metavar='N', help='print frequency (default: 10)')
 parser.add_argument('--resume', default='', type=str, metavar='PATH',
                     help='path to latest checkpoint (default: none)')
@@ -67,8 +67,9 @@ parser.add_argument('--dist-backend', default='gloo', type=str,
                     help='distributed backend')
 parser.add_argument('--seed', default=None, type=int,
                     help='seed for initializing training. ')
-parser.add_argument('--gpu', default=None, type=int,
+parser.add_argument('--gpu', default='0', type=int,
                     help='GPU id to use.')
+parser.add_argument('--checkpoint_dir', default='./checkpoint_test')
 
 best_prec1 = 0
 
@@ -101,6 +102,9 @@ def main():
     args = parser.parse_args()
     for name, value in vars(args).items():
         print('{} = {}'.format(name, value))
+
+    if not os.path.exists(args.checkpoint_dir):
+        os.mkdir(args.checkpoint_dir)
     if args.seed is not None:
         random.seed(args.seed)
         torch.manual_seed(args.seed)
@@ -129,7 +133,7 @@ def main():
         print("=> creating model '{}'".format(args.arch))
         model = models.__dict__[args.arch]()
     model.classifier._modules['6'] = nn.Linear(4096, 27)
-
+    state = model.state_dict()
     if args.gpu is not None:
         model = model.cuda(args.gpu)
     elif args.distributed:
@@ -173,7 +177,7 @@ def main():
         transforms.RandomResizedCrop(224),
         transforms.RandomHorizontalFlip(),
         transforms.ToTensor(),
-        normalize,
+        #normalize,
     ])
     train_dataset = WikiArtDataset(csv_file=wikiart_train_csv, root_dir=wikiart_img_root,
                                            transform=data_transform)
@@ -210,13 +214,17 @@ def main():
         # remember best prec@1 and save checkpoint
         is_best = prec1 > best_prec1
         best_prec1 = max(prec1, best_prec1)
+        print('Saving models, Donot interrupt...')
+        save_pth(model.state_dict(), is_best, filename=os.path.join(args.checkpoint_dir, 'checkpoint.pth'))
         save_checkpoint({
             'epoch': epoch + 1,
             'arch': args.arch,
             'state_dict': model.state_dict(),
             'best_prec1': best_prec1,
             'optimizer' : optimizer.state_dict(),
-        }, is_best)
+        }, is_best,
+        filename=os.path.join(args.checkpoint_dir, 'checkpoint.pth.tar'))
+        print('Saving models completed.')
 
 
 def train(train_loader, model, criterion, optimizer, epoch):
@@ -281,7 +289,9 @@ def validate(val_loader, model, criterion):
 
     with torch.no_grad():
         end = time.time()
-        for i, (input, target) in enumerate(val_loader):
+        for i, data in enumerate(val_loader):
+            input = data['image']
+            target = data['label']
             if args.gpu is not None:
                 input = input.cuda(args.gpu, non_blocking=True)
             target = target.cuda(args.gpu, non_blocking=True)
@@ -319,6 +329,12 @@ def save_checkpoint(state, is_best, filename='checkpoint.pth.tar'):
     torch.save(state, filename)
     if is_best:
         shutil.copyfile(filename, 'model_best.pth.tar')
+
+
+def save_pth(state, is_best, filename='checkpoint.pth'):
+    torch.save(state, filename)
+    if is_best:
+        shutil.copyfile(filename, 'model_best.pth')
 
 
 class AverageMeter(object):
