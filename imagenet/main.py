@@ -16,29 +16,37 @@ import torch.utils.data.distributed
 import torchvision.transforms as transforms
 import torchvision.datasets as datasets
 import torchvision.models as models
+from torch.utils.data import Dataset
+import pandas as pd
+from PIL import Image
+from PIL import ImageFile
+
+os.environ['CUDA_VISIBLE_DEVICES']='1'
+ImageFile.LOAD_TRUNCATED_IMAGES = True
+Image.MAX_IMAGE_PIXELS = 1000000000
+device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+warnings.filterwarnings("ignore")
 
 model_names = sorted(name for name in models.__dict__
     if name.islower() and not name.startswith("__")
     and callable(models.__dict__[name]))
 
 parser = argparse.ArgumentParser(description='PyTorch ImageNet Training')
-parser.add_argument('data', metavar='DIR',
-                    help='path to dataset')
-parser.add_argument('--arch', '-a', metavar='ARCH', default='resnet18',
+parser.add_argument('--arch', '-a', metavar='ARCH', default='vgg19',
                     choices=model_names,
                     help='model architecture: ' +
                         ' | '.join(model_names) +
-                        ' (default: resnet18)')
+                        ' (default: resnet18)')  # original resnet18
 parser.add_argument('-j', '--workers', default=4, type=int, metavar='N',
                     help='number of data loading workers (default: 4)')
 parser.add_argument('--epochs', default=90, type=int, metavar='N',
                     help='number of total epochs to run')
 parser.add_argument('--start-epoch', default=0, type=int, metavar='N',
                     help='manual epoch number (useful on restarts)')
-parser.add_argument('-b', '--batch-size', default=256, type=int,
-                    metavar='N', help='mini-batch size (default: 256)')
-parser.add_argument('--lr', '--learning-rate', default=0.1, type=float,
-                    metavar='LR', help='initial learning rate')
+parser.add_argument('-b', '--batch-size', default=4, type=int,
+                    metavar='N', help='mini-batch size (default: 256)')  # original 256
+parser.add_argument('--lr', '--learning-rate', default=0.001, type=float,
+                    metavar='LR', help='initial learning rate')  # original 0.1
 parser.add_argument('--momentum', default=0.9, type=float, metavar='M',
                     help='momentum')
 parser.add_argument('--weight-decay', '--wd', default=1e-4, type=float,
@@ -65,10 +73,34 @@ parser.add_argument('--gpu', default=None, type=int,
 best_prec1 = 0
 
 
+class WikiArtDataset(Dataset):
+    def __init__(self, csv_file, root_dir, transform=None):
+        self.image_list = pd.read_csv(csv_file)
+        self.root_dir = root_dir
+        self.transform = transform
+
+    def __len__(self):
+        return len(self.image_list)
+
+    def __getitem__(self, idx):
+        img_name = os.path.join(self.root_dir, self.image_list.iloc[idx, 0])
+        image = Image.open(img_name)
+        label = self.image_list.iloc[idx, 1]
+        if self.transform:
+            image = self.transform(image)
+        sample = {'image': image, 'label': label, 'path':img_name}
+        return sample
+
+
 def main():
+    wikiart_img_root = '/media/gisdom/2TB_2/luyue/datasets/wikiart'
+    wikiart_train_csv = '/media/gisdom/2TB_2/luyue/ArtGAN/WikiArt Dataset/Style/style_train.csv'
+    wikiart_validate_csv = '/media/gisdom/2TB_2/luyue/ArtGAN/WikiArt Dataset/Style/style_val.csv'
+
     global args, best_prec1
     args = parser.parse_args()
-
+    for name, value in vars(args).items():
+        print('{} = {}'.format(name, value))
     if args.seed is not None:
         random.seed(args.seed)
         torch.manual_seed(args.seed)
@@ -96,6 +128,7 @@ def main():
     else:
         print("=> creating model '{}'".format(args.arch))
         model = models.__dict__[args.arch]()
+    model.classifier._modules['6'] = nn.Linear(4096, 27)
 
     if args.gpu is not None:
         model = model.cuda(args.gpu)
@@ -133,20 +166,19 @@ def main():
     cudnn.benchmark = True
 
     # Data loading code
-    traindir = os.path.join(args.data, 'train')
-    valdir = os.path.join(args.data, 'val')
     normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406],
                                      std=[0.229, 0.224, 0.225])
 
-    train_dataset = datasets.ImageFolder(
-        traindir,
-        transforms.Compose([
-            transforms.RandomResizedCrop(224),
-            transforms.RandomHorizontalFlip(),
-            transforms.ToTensor(),
-            normalize,
-        ]))
-
+    data_transform = transforms.Compose([
+        transforms.RandomResizedCrop(224),
+        transforms.RandomHorizontalFlip(),
+        transforms.ToTensor(),
+        normalize,
+    ])
+    train_dataset = WikiArtDataset(csv_file=wikiart_train_csv, root_dir=wikiart_img_root,
+                                           transform=data_transform)
+    validate_dataset = WikiArtDataset(csv_file=wikiart_validate_csv, root_dir=wikiart_img_root,
+                                              transform=data_transform)
     if args.distributed:
         train_sampler = torch.utils.data.distributed.DistributedSampler(train_dataset)
     else:
@@ -156,13 +188,7 @@ def main():
         train_dataset, batch_size=args.batch_size, shuffle=(train_sampler is None),
         num_workers=args.workers, pin_memory=True, sampler=train_sampler)
 
-    val_loader = torch.utils.data.DataLoader(
-        datasets.ImageFolder(valdir, transforms.Compose([
-            transforms.Resize(256),
-            transforms.CenterCrop(224),
-            transforms.ToTensor(),
-            normalize,
-        ])),
+    val_loader = torch.utils.data.DataLoader(validate_dataset,
         batch_size=args.batch_size, shuffle=False,
         num_workers=args.workers, pin_memory=True)
 
@@ -204,7 +230,9 @@ def train(train_loader, model, criterion, optimizer, epoch):
     model.train()
 
     end = time.time()
-    for i, (input, target) in enumerate(train_loader):
+    for i, data in enumerate(train_loader):
+        input = data['image']
+        target = data['label']
         # measure data loading time
         data_time.update(time.time() - end)
 
