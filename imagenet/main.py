@@ -201,7 +201,7 @@ def main():
             args.start_epoch = checkpoint['epoch']
             best_prec1 = checkpoint['best_prec1']
             model.load_state_dict(checkpoint['state_dict'])
-            optimizer.load_state_dict(checkpoint['optimizer'])
+            # optimizer.load_state_dict(checkpoint['optimizer'])
             print("=> loaded checkpoint '{}' (epoch {})"
                   .format(args.resume, checkpoint['epoch']))
         else:
@@ -233,31 +233,29 @@ def main():
         num_workers=args.workers, pin_memory=True, sampler=train_sampler)
 
     val_loader = torch.utils.data.DataLoader(validate_dataset,
-                                             batch_size=1, shuffle=False,
-                                             num_workers=args.workers, pin_memory=True)
+                                             batch_size=64, shuffle=False,
+                                             num_workers=8, pin_memory=True)
     val_trainset_loader = torch.utils.data.DataLoader(train_dataset,
-                                             batch_size=4, shuffle=False,
-                                             num_workers=args.workers, pin_memory=True)
+                                             batch_size=64, shuffle=False,
+                                             num_workers=8, pin_memory=True)
 
     if args.evaluate:
-        validate(val_loader, model, criterion)
+        validate('validationSet', val_loader, model, criterion)
         return
 
     for epoch in range(args.start_epoch, args.epochs):
-        print(time.asctime(time.localtime(time.time())))
+
         if args.distributed:
             train_sampler.set_epoch(epoch)
-        adjust_learning_rate(optimizer, epoch)
-        train_prec1 = validate(val_trainset_loader, model, criterion, epoch)
+        # adjust_learning_rate(optimizer, epoch)
 
         # train for one epoch
         train(train_loader, model, criterion, optimizer, epoch)
 
-        train_prec1 = validate(val_trainset_loader, model, criterion, epoch)
+        train_prec1 = validate('trainSet', val_trainset_loader, model, criterion, epoch)
 
         # evaluate on validation set
-        print(time.asctime(time.localtime(time.time())))
-        prec1 = validate(val_loader, model, criterion, epoch)
+        prec1 = validate('validationSet', val_loader, model, criterion, epoch)
 
         # remember best prec@1 and save checkpoint
         is_best = prec1 > best_prec1
@@ -278,9 +276,10 @@ def main():
 
 
 def train(train_loader, model, criterion, optimizer, epoch):
+    print(time.asctime(time.localtime(time.time())))
     batch_time = AverageMeter()
     data_time = AverageMeter()
-    losses = AverageMeter()
+    loss1 = AverageMeter()
     top1 = AverageMeter()
     top5 = AverageMeter()
 
@@ -307,7 +306,7 @@ def train(train_loader, model, criterion, optimizer, epoch):
 
         # measure accuracy and record loss
         prec1, prec5 = accuracy(output, target, topk=(1, 5))
-        losses.update(loss.item(), input.size(0))
+        loss1.update(loss.item(), input.size(0))
         top1.update(prec1[0], input.size(0))
         top5.update(prec5[0], input.size(0))
 
@@ -321,33 +320,35 @@ def train(train_loader, model, criterion, optimizer, epoch):
         end = time.time()
 
         if i%args.tensorboard_print_freq==0:
-            writer.add_scalar('train_all_class/loss.val', losses.val, writer_idx)
-            writer.add_scalar('train_all_class/loss.avg', losses.avg, writer_idx)
-            writer.add_scalar('train_all_class/top1.avg', top1.avg, writer_idx)
+            writer.add_scalar('realtime_training/loss.val', loss1.val, writer_idx)
+            writer.add_scalar('realtime_training/loss.avg', loss1.avg, writer_idx)
+            writer.add_scalar('realtime_training/top1.avg', top1.avg, writer_idx)
+            writer.add_scalar('realtime_training/top5.avg', top5.avg, writer_idx)
 
         if i % args.print_freq == 0 or i == len(train_loader) - 1:
             print('Epoch: [{0}][{1}/{2}]\t'
                   'Time {batch_time.val:.3f} ({batch_time.avg:.3f})\t'
                   'Data {data_time.val:.3f} ({data_time.avg:.3f})\t'
-                  'Loss {loss.val:.4f} ({loss.avg:.4f})\t'
-                  'Prec@1 {top1.val:.3f} ({top1.avg:.3f})\t'
-                  'Prec@5 {top5.val:.3f} ({top5.avg:.3f})'.format(
+                  'Loss {loss1.val:.4f} ({loss1.avg:.4f})\t'
+                  'Prec@1 ({top1:.3f})\t'
+                  'Prec@5 ({top5:.3f})'.format(
                 epoch, i, len(train_loader), batch_time=batch_time,
-                data_time=data_time, loss=losses, top1=top1, top5=top5))
+                data_time=data_time, loss1=loss1, top1=top1.avg, top5=top5.avg))
         if i % 100 == 0 and args.dispaly_images:
             writer.add_image('epoch{:0>3d}/iter{:0>5d}_0oriImage'.format(epoch, i), data['ori_image'])
             writer.add_image('epoch{:0>3d}/iter{:0>5d}_1image'.format(epoch, i), data['image'])
     param_watcher.update(model.state_dict(), epoch)
+    print(time.asctime(time.localtime(time.time())))
 
 
-def validate(val_loader, model, criterion, epoch):
+def validate(name, val_loader, model, criterion, epoch=0):
+    print(time.asctime(time.localtime(time.time())))
+    print('Validate on {}'.format(name))
     batch_time = AverageMeter()
-    losses = AverageMeter_group(size=num_class[args.class_type])
-    top1 = AverageMeter_group(size=num_class[args.class_type])
-    top5 = AverageMeter_group(size=num_class[args.class_type])
-    top1_all = AverageMeter()
-    top5_all = AverageMeter()
-    losses_all = AverageMeter()
+    # losses = AverageGroup(size=num_class[args.class_type])
+    top1s = AverageGroup(size=num_class[args.class_type])
+    top5s = AverageGroup(size=num_class[args.class_type])
+    losses = AverageGroup(size=num_class[args.class_type])
 
     # switch to evaluate mode
     model.eval()
@@ -364,15 +365,13 @@ def validate(val_loader, model, criterion, epoch):
             # compute output
             output = model(input)
             loss = criterion(output, target)
+            losses_data = [criterion(output[i].view(1,-1), target[i].view(-1)) for i in range(len(output))]
+            losses.update(losses_data, target)
 
             # measure accuracy and record loss
-            prec1, prec5 = accuracy(output, target, topk=(1, 5))
-            losses.update(loss.item(),  idx=target, n=input.size(0))
-            losses_all.update(loss.item(), n=input.size(0))
-            top1.update(prec1[0], idx=target, n=input.size(0))
-            top5.update(prec5[0], idx=target, n=input.size(0))
-            top1_all.update(prec1[0], input.size(0))
-            top5_all.update(prec5[0], input.size(0))
+            prec1s, prec5s = accuracyes(output, target, topk=(1, 5))
+            top1s.update(prec1s, target)
+            top5s.update(prec5s, target)
 
             # measure elapsed time
             batch_time.update(time.time() - end)
@@ -381,32 +380,32 @@ def validate(val_loader, model, criterion, epoch):
             if i % args.print_freq == 0 or i == len(val_loader) - 1:
                 print('Test: [{0}/{1}]\t'
                       'Time {batch_time.val:.3f} ({batch_time.avg:.3f})\t'
-                      'Loss {loss.val:.4f} ({loss.avg:.4f})\t'
-                      'Prec@1 {top1.val:.3f} ({top1.avg:.3f})\t'
-                      'Prec@5 {top5.val:.3f} ({top5.avg:.3f})'.format(
-                    i, len(val_loader), batch_time=batch_time, loss=losses_all,
-                    top1=top1_all, top5=top5_all))
+                      'Loss ({losses.avg:.4f})\t'
+                      'Prec@1 ({top1s.avg:.3f})\t'
+                      'Prec@5 ({top5s.avg:.3f})'.format(
+                    i, len(val_loader), batch_time=batch_time, losses=losses,
+                    top1s=top1s, top5s=top5s))
 
-        writer.add_scalar('val_all_class/losses_all', losses_all.avg, epoch)
-        writer.add_scalar('val_all_class/top1_all.avg', top1_all.avg, epoch)
-        writer.add_scalar('val_all_class/top5_all.avg', top5_all.avg, epoch)
-        for idx, value in enumerate(top1.avg):
-            writer.add_scalar('val_class_top1/{}'.format(idx), value, epoch)
-        for idx, value in enumerate(top5.avg):
-            writer.add_scalar('val_class_top5/{}'.format(idx), value, epoch)
-        for idx, value in enumerate(losses.avg):
-            writer.add_scalar('val_class_loss/{}'.format(idx), value, epoch)
-        for idx, value in enumerate(top1.count):
-            writer.add_scalar('val_class_count/{}'.format(idx), value, epoch)
-        writer.add_scalar('val_class_count/all', top1_all.count, epoch)
-
-    return top1_all.avg
+        writer.add_scalar('{}/losses.avg'.format(name), losses.avg, epoch)
+        writer.add_scalar('{}/top1s.avg'.format(name), top1s.avg, epoch)
+        writer.add_scalar('{}/top5s.avg'.format(name), top5s.avg, epoch)
+        for idx, value in enumerate(top1s.avgs):
+            writer.add_scalar('{}_class_top1s/{}'.format(name, idx), value, epoch)
+        for idx, value in enumerate(top5s.avgs):
+            writer.add_scalar('{}_class_top5s/{}'.format(name, idx), value, epoch)
+        for idx, value in enumerate(losses.avgs):
+            writer.add_scalar('{}_class_losses/{}'.format(name, idx), value, epoch)
+        for idx, value in enumerate(top1s.counts):
+            writer.add_scalar('{}_class_counts/{}'.format(name, idx), value, epoch)
+        writer.add_scalar('{}_class_counts/all'.format(name), top1s.count, epoch)
+    print(time.asctime(time.localtime(time.time())))
+    return top1s.avg
 
 
 def save_checkpoint(state, is_best, filename='checkpoint.pth.tar'):
     torch.save(state, filename)
     if is_best:
-        shutil.copyfile(filename, 'model_best.pth.tar')
+        shutil.copyfile(filename, os.path.join(args.checkpoint_dir, 'model_best.pth.tar'))
 
 class AverageMeter(object):
     """Computes and stores the average and current value"""
@@ -417,33 +416,36 @@ class AverageMeter(object):
     def reset(self):
         self.val = 0
         self.avg = 0
-        self.sum = 0
+        self.sum1 = 0
         self.count = 0
 
     def update(self, val, n=1):
         self.val = val
-        self.sum += val * n
+        self.sum1 += val * n
         self.count += n
-        self.avg = self.sum / self.count
+        self.avg = self.sum1 / self.count
 
-class AverageMeter_group(object):
-    """Computes and stores the average and current value"""
 
+class AverageGroup(object):
     def __init__(self, size=1):
         self.reset(size)
 
     def reset(self, size=1):
-        self.val = np.zeros(size)
-        self.avg = np.zeros(size)
-        self.sum = np.zeros(size)
-        self.count = np.zeros(size)
+        self.avgs = np.zeros(size)
+        self.sums = np.zeros(size)
+        self.counts = np.zeros(size)
+        self.count = 0
+        self.sum1 = 0
+        self.avg = 0
 
-    def update(self, val, idx, n=1):
-        self.val[idx] = val
-        self.sum[idx] += val * n
-        self.count[idx] += n
-        self.avg[idx] = self.sum[idx] / self.count[idx]
-
+    def update(self, val, idx):
+        self.sum1 += sum(val)
+        self.count += len(idx)
+        self.avg = self.sum1/self.count
+        for i in range(len(idx)):
+            self.sums[idx[i]] += val[i]
+            self.counts[idx[i]] += 1
+            self.avgs[idx[i]] = self.sums[idx[i]] / self.counts[idx[i]]
 
 class ParameterWatcher(object):
     def __init__(self, state_dict):
@@ -487,12 +489,29 @@ def accuracy(output, target, topk=(1,)):
         correct = pred.eq(target.view(1, -1).expand_as(pred))
 
         res = []
+        for k in topk:
+            correct_k = correct[:k].view(-1).float().sum(0, keepdim=True)
+            res.append(correct_k.mul_(100.0 / batch_size))
+        return res
+
+
+def accuracyes(output, target, topk=(1,)):
+    """Computes the precision@k for the specified values of k"""
+    with torch.no_grad():
+        maxk = max(topk)
+        batch_size = target.size(0)
+
+        _, pred = output.topk(maxk, 1, True, True)
+        pred = pred.t()
+        correct = pred.eq(target.view(1, -1).expand_as(pred))
+
+        res = []
         # for k in topk:
         #     correct_k = correct[:k].view(-1).float().sum(0, keepdim=True)
         #     res.append(correct_k.mul_(100.0 / batch_size))
         # return res
 
-        return [correct[:k].float().sum(0) for k in topk]
+        return [correct[:k].float().sum(0)*100.0 for k in topk]
 
 
 
