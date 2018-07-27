@@ -87,7 +87,7 @@ num_class = {'Genre': 10,
 csv_path = {'Genre_train_csv':'/media/gisdom/2TB_2/luyue/ArtGAN/WikiArt Dataset/Genre/genre_train.csv',
             'Genre_validate_csv': '/media/gisdom/2TB_2/luyue/ArtGAN/WikiArt Dataset/Genre/genre_train.csv',
             'Artist_train_csv': '/media/gisdom/2TB_2/luyue/ArtGAN/WikiArt Dataset/Artist/artist_train.csv',
-            'Artist_validate_csv': '/media/gisdom/2TB_2/luyue/ArtGAN/WikiArt Dataset/Artist/artist_train.csv',
+            'Artist_validate_csv': '/media/gisdom/2TB_2/luyue/ArtGAN/WikiArt Dataset/Artist/artist_val.csv',
             'Style_train_csv': '/media/gisdom/2TB_2/luyue/ArtGAN/WikiArt Dataset/Style/style_train.csv',
             'Style_validate_csv': '/media/gisdom/2TB_2/luyue/ArtGAN/WikiArt Dataset/Style/style_val.csv',
             'Style18_train_csv': '/media/gisdom/2TB_2/luyue/ArtGAN/WikiArt Dataset/Style/style_train_18.csv',
@@ -213,16 +213,20 @@ def main():
     normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406],
                                      std=[0.229, 0.224, 0.225])
 
-    data_transform = transforms.Compose([
+    train_transform = transforms.Compose([
         transforms.RandomResizedCrop(224),
         transforms.RandomHorizontalFlip(),
         transforms.ToTensor(),
         # normalize,
     ])
+    val_transform = transforms.Compose([transforms.Resize((224, 224)),
+                                        transforms.ToTensor()])
     train_dataset = WikiArtDataset(csv_file=csv_path[args.class_type+'_train_csv'], root_dir=wikiart_img_root,
-                                   transform=data_transform)
+                                   transform=train_transform)
+    validate_trainSet = WikiArtDataset(csv_file=csv_path[args.class_type + '_train_csv'], root_dir=wikiart_img_root,
+                                      transform=val_transform)
     validate_dataset = WikiArtDataset(csv_file=csv_path[args.class_type+'_validate_csv'], root_dir=wikiart_img_root,
-                                      transform=data_transform)
+                                      transform=val_transform)
     if args.distributed:
         train_sampler = torch.utils.data.distributed.DistributedSampler(train_dataset)
     else:
@@ -235,12 +239,13 @@ def main():
     val_loader = torch.utils.data.DataLoader(validate_dataset,
                                              batch_size=64, shuffle=False,
                                              num_workers=8, pin_memory=True)
-    val_trainset_loader = torch.utils.data.DataLoader(train_dataset,
+    val_trainset_loader = torch.utils.data.DataLoader(validate_trainSet,
                                              batch_size=64, shuffle=False,
                                              num_workers=8, pin_memory=True)
 
     if args.evaluate:
         validate('validationSet', val_loader, model, criterion)
+        validate('trainSet', val_trainset_loader, model, criterion)
         return
 
     for epoch in range(args.start_epoch, args.epochs):
